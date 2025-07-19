@@ -1,6 +1,10 @@
 package pipeline
 
-import "net/http"
+import (
+	"net/http"
+	"platform/services"
+	"reflect"
+)
 
 type RequestPipeline func(*ComponentContext)
 
@@ -8,19 +12,44 @@ var emptyPipeline RequestPipeline = func(*ComponentContext) {
 	/* do nothing */
 }
 
-func CreatePipeline(components ...MiddlewareComponent) RequestPipeline {
+func CreatePipeline(components ...interface{}) RequestPipeline {
 	f := emptyPipeline
 	for i := 0; i < len(components); i++ {
 		currentComponent := components[i]
+		services.Populate(currentComponent)
 		nextFunc := f
-		f = func(context *ComponentContext) {
-			if context.error == nil {
-				currentComponent.ProcessRequest(context, nextFunc)
+		if servComp, ok := currentComponent.(ServicesMiddlewareComponent); ok {
+			f = createServiceDependentFunction(currentComponent, nextFunc)
+			servComp.Init()
+		} else if stdComp, ok := currentComponent.(MiddlewareComponent); ok {
+			f = func(context *ComponentContext) {
+				if context.error == nil {
+					stdComp.ProcessRequest(context, nextFunc)
+				}
 			}
+			stdComp.Init()
+		} else {
+			panic("Values is not a middleware component")
 		}
-		currentComponent.Init()
+
 	}
 	return f
+}
+
+func createServiceDependentFunction(component interface{}, nextFunc RequestPipeline) RequestPipeline {
+	method := reflect.ValueOf(component).MethodByName("ProcessRequestWithServices")
+	if method.IsValid() {
+		return func(context *ComponentContext) {
+			if context.error == nil {
+				_, err := services.CallForContext(context.Request.Context(), method.Interface(), context, nextFunc)
+				if err != nil {
+					context.Error(err)
+				}
+			}
+		}
+	} else {
+		panic("No ProcessRequestWithServices method defined")
+	}
 }
 
 func (pl RequestPipeline) ProcessRequest(req *http.Request, resp http.ResponseWriter) error {
